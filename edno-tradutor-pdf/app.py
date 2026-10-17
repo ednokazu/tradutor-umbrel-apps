@@ -1,6 +1,6 @@
 """Tradutor de senhas de PDF (Opção A) - Edno AI.
 
-Recebe um PDF e só o NOME do perfil (ex.: "c6"). Busca a senha num arquivo
+Recebe um PDF e só o NOME do perfil (ex.: "c6"), ou "auto" para tentar todas as senhas. Busca a senha num arquivo
 protegido, chama o Stirling PDF (multipart) e devolve o PDF aberto.
 
 Regras de segurança (do plano de 17/10/2026):
@@ -22,7 +22,6 @@ STIRLING_URL = os.environ["STIRLING_URL"].rstrip("/")  # ex.: http://stirling-pd
 TOKEN_FILE = os.environ.get("TOKEN_FILE", "/segredos/token")
 SENHAS_FILE = os.environ.get("SENHAS_FILE", "/segredos/senhas.json")
 PERFIL_OK = re.compile(r"^[a-z0-9_-]{1,32}$")
-
 
 def _preparar_segredos():
     """Primeira subida: cria a pasta, um token aleatório e uma lista de perfis vazia.
@@ -72,7 +71,7 @@ def desbloquear():
     if not esperado or not hmac.compare_digest(enviado.encode(), esperado.encode()):
         return erro(401, "nao_autorizado")
 
-    # 2) perfil
+    # 2) perfil: um nome da lista, ou "auto" (tenta todas as senhas cadastradas)
     perfil = request.form.get("perfil", "")
     if not PERFIL_OK.match(perfil):
         return erro(400, "perfil_invalido")
@@ -80,9 +79,16 @@ def desbloquear():
         senhas = json.loads(_ler(SENHAS_FILE))
     except (OSError, ValueError):
         return erro(500, "indisponivel")
-    senha = senhas.get(perfil)
-    if not isinstance(senha, str) or not senha:
-        return erro(404, "perfil_desconhecido")
+    if perfil == "auto":
+        candidatos = [(n, s) for n, s in senhas.items() if isinstance(s, str) and s]
+        if not candidatos:
+            return erro(404, "perfil_desconhecido")
+    else:
+        senha = senhas.get(perfil)
+        if not isinstance(senha, str) or not senha:
+            return erro(404, "perfil_desconhecido")
+        candidatos = [(perfil, senha)]
+        senha = None
 
     # 3) arquivo
     arquivo = request.files.get("file")
@@ -92,21 +98,23 @@ def desbloquear():
     if not conteudo.startswith(b"%PDF"):
         return erro(400, "nao_e_pdf")
 
-    # 4) Stirling (senha só dentro do corpo multipart, nunca na URL)
-    try:
-        r = requests.post(
-            f"{STIRLING_URL}/api/v1/security/remove-password",
-            files={"fileInput": ("entrada.pdf", io.BytesIO(conteudo), "application/pdf")},
-            data={"password": senha},
-            timeout=60,
-        )
-    except requests.RequestException:
-        return erro(502, "stirling_indisponivel")
-    finally:
-        senha = None  # não manter em variável
+    # 4) Stirling: tenta cada candidato (senha só dentro do corpo multipart, nunca na URL)
+    for nome, senha in candidatos:
+        try:
+            r = requests.post(
+                f"{STIRLING_URL}/api/v1/security/remove-password",
+                files={"fileInput": ("entrada.pdf", io.BytesIO(conteudo), "application/pdf")},
+                data={"password": senha},
+                timeout=60,
+            )
+        except requests.RequestException:
+            return erro(502, "stirling_indisponivel")
+        finally:
+            senha = None  # não manter em variável
+        if r.status_code == 200 and r.content.startswith(b"%PDF"):
+            resp = Response(r.content, mimetype="application/pdf")
+            resp.headers["X-Perfil-Usado"] = nome  # só o NOME do perfil, nunca a senha
+            return resp
 
-    if r.status_code != 200 or not r.content.startswith(b"%PDF"):
-        # Senha errada ou PDF inválido: mesma resposta, sem repassar o texto do Stirling.
-        return erro(422, "nao_foi_possivel_abrir")
-
-    return Response(r.content, mimetype="application/pdf")
+    # Nenhuma senha abriu: mesma resposta curta, sem repassar o texto do Stirling.
+    return erro(422, "nao_foi_possivel_abrir")
