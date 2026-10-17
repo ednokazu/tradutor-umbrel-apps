@@ -2,7 +2,7 @@ manifestVersion: 1
 id: edno-tradutor-pdf
 category: developer
 name: Tradutor de PDF
-version: "0.1.0"
+version: "0.2.0"
 tagline: Abre PDFs com senha para o n8n, sem guardar senha no n8n
 description: >-
   Serviço interno do Edno AI. Recebe um PDF e só o NOME do perfil (ex.: c6),
